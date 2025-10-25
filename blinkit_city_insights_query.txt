@@ -1,0 +1,70 @@
+CREATE DATABASE blinkit;
+use blinkit;
+
+USE blinkit;
+
+CREATE TABLE blinkit_city_insights AS
+WITH base AS (
+  SELECT
+    s.*,
+    m.city_name
+  FROM all_blinkit_category_scraping_stream s
+  JOIN blinkit_city_map m
+    ON s.store_id = m.store_id
+ WHERE s.inventory IS NOT NULL
+   AND s.created_at IS NOT NULL
+),
+ordered AS(
+  SELECT
+    b.*,
+	LEAD(b.inventory) OVER (
+		PARTITION BY b.store_id, b.sku_id
+        ORDER BY b.created_at
+	) AS next_inventory,
+    LEAD(b.created_at) OVER ( 
+		PARTITION BY b.store_id, b.sku_id
+        ORDER BY b.created_at
+	) AS next_snapshot_time
+  FROM base b
+),
+intervals AS (
+  SELECT
+    o.store_id,
+    o.sku_id,
+    o.sku_name,
+    o.inventory AS current_inventory,
+    o.next_inventory,
+    o.created_at AS snapshot_time,
+    o.next_snapshot_time,
+    o.city_name,
+    (o.inventory - o.next_inventory) AS diff
+  FROM ordered o
+  WHERE o.next_inventory IS NOT NULL
+)
+SELECT
+  i.store_id,
+  i.sku_id,
+  i.sku_name,
+  i.snapshot_time,
+  i.next_snapshot_time,
+  i.current_inventory,
+  i.next_inventory,
+  i.city_name,
+  i.diff AS raw_inventory_change,
+  CASE
+    WHEN i.diff >= 0 THEN i.diff
+    ELSE COALESCE((
+	  SELECT AVG(prev.diff)
+      FROM intervals prev
+      WHERE prev.store_id = i.store_id
+        AND prev.sku_id = i.sku_id
+        AND prev.snapshot_time < i.snapshot_time
+        AND prev.diff > 0
+	  ORDER BY prev.snapshot_time DESC
+      LIMIT 3
+	), 0)
+  END AS est_qty_sold
+FROM intervals i;
+
+  
+DROP TABLE IF EXISTS blinkit_city_insights;
